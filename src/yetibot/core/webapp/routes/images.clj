@@ -27,6 +27,11 @@
                  store))))
     id))
 
+(defn get-image
+  "Retrieve stored image data by ID, or nil if not found."
+  [id]
+  (get @image-store id))
+
 (defroutes image-routes
   (GET "/generated-images/:id.png" [id]
     (if-let [{:keys [data mime-type]} (get @image-store id)]

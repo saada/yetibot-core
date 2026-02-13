@@ -8,7 +8,10 @@
             [taoensso.timbre :as timbre]
             [yetibot.core.adapters.adapter :as adapter]
             [yetibot.core.handler :as handler]
-            [yetibot.core.chat :as chat]))
+            [yetibot.core.chat :as chat]
+            [yetibot.core.webapp.routes.images :as images])
+  (:import [java.util Base64]
+           [java.io ByteArrayInputStream]))
 
 (spec/def ::type #{"discord"})
 (spec/def ::token string?)
@@ -103,8 +106,29 @@
     (timbre/debug "Guild Channels: " (pr-str guild-channels))
     (guild-channels)))
 
+(defn- generated-image-id
+  "Extract the image store ID from a generated-images URL, or nil if the message
+   is not a generated image URL."
+  [msg]
+  (when (string? msg)
+    (second (re-matches #".*/generated-images/([0-9a-f-]+)\.png" (.trim msg)))))
+
 (defn- send-msg [{:keys [conn]} msg]
-  (messaging/create-message! (:rest @conn) chat/*target* :content msg))
+  (if-let [id (generated-image-id msg)]
+    ;; If the message is a generated image URL, send the image as a Discord
+    ;; file attachment instead of a URL. This allows the image to display
+    ;; even when the yetibot server is not publicly accessible.
+    (if-let [{:keys [data]} (images/get-image id)]
+      (let [bytes (.decode (Base64/getDecoder) ^String data)
+            stream (ByteArrayInputStream. bytes)]
+        (timbre/debug "discord: sending generated image as attachment:" id)
+        (messaging/create-message! (:rest @conn) chat/*target*
+                                   :stream {:content stream
+                                            :filename (str id ".png")}))
+      (do
+        (timbre/warn "discord: image not found in store for id:" id)
+        (messaging/create-message! (:rest @conn) chat/*target* :content msg)))
+    (messaging/create-message! (:rest @conn) chat/*target* :content msg)))
 
 (defn stop
   "stop the discord connection"
