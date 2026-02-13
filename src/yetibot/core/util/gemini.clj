@@ -34,6 +34,26 @@
                :mime-type (:mimeType inline-data)}))
           parts)))
 
+(def ^:private error-messages
+  {429 "Gemini API rate limit exceeded. Please wait a moment and try again."
+   400 "Gemini API rejected the request. The prompt may be invalid or unsupported."
+   401 "Gemini API key is invalid. Check your `gemini.api.key` config."
+   403 "Gemini API access denied. Your API key may lack image generation permissions."})
+
+(defn- parse-error-message
+  "Extract a human-readable error message from a Gemini API error response."
+  [{:keys [status body]}]
+  (let [detail (try
+                 (let [parsed (if (string? body) (json/read-str body) body)]
+                   (or (get-in parsed ["error" "message"])
+                       (get-in parsed [:error :message])))
+                 (catch Exception _ nil))
+        default-msg (get error-messages status
+                         (str "Gemini API error (HTTP " status ")"))]
+    (if detail
+      (str default-msg " Details: " detail)
+      default-msg)))
+
 (defn generate-image
   "Call the Gemini API to generate an image from a text prompt.
    Accepts an optional system-instruction string for guiding generation style."
@@ -49,12 +69,16 @@
                 system-instruction
                 (assoc :systemInstruction
                        {:parts [{:text system-instruction}]}))
-         response (client/post url
-                               {:content-type :json
-                                :body (json/write-str body)
-                                :as :json
-                                :throw-exceptions true})]
-     (extract-image (:body response)))))
+         {:keys [status] :as response}
+         (client/post url
+                      {:content-type :json
+                       :body (json/write-str body)
+                       :as :json
+                       :throw-exceptions false})]
+     (if (<= 200 status 299)
+       (extract-image (:body response))
+       (throw (ex-info (parse-error-message response)
+                       {:status status :prompt prompt}))))))
 
 (defn yetibot-base-url []
   (or (:value (get-config string? [:url]))
