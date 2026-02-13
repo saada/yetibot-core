@@ -8,17 +8,21 @@
 
 (s/def ::key string?)
 
-(s/def ::config (s/keys :req-un [::key]))
-
-(def config (:value (get-config ::config [:gemini :api])))
+(s/def ::gemini-config (s/keys :req-un [::key]))
 
 (def default-model "gemini-2.0-flash-exp")
 
-(defn gemini-model []
-  (or (:model config) default-model))
+(defn config
+  "Returns the Gemini API config map, or nil if not configured.
+   Evaluated at call time to avoid load-order issues."
+  []
+  (:value (get-config ::gemini-config [:gemini :api])))
 
 (defn configured? []
-  (some? config))
+  (some? (config)))
+
+(defn- gemini-model []
+  (or (:model (config)) default-model))
 
 (defn- extract-image
   "Extract the first image part from the Gemini API response."
@@ -35,7 +39,7 @@
    Accepts an optional system-instruction string for guiding generation style."
   ([prompt] (generate-image prompt nil))
   ([prompt system-instruction]
-   (let [api-key (:key config)
+   (let [api-key (:key (config))
          model (gemini-model)
          url (format
               "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
