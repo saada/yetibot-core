@@ -8,7 +8,8 @@
             [yetibot.core.config :refer [get-config]]
             [yetibot.core.db.image-budget :as image-budget])
   (:import [java.time YearMonth]
-           [java.time.format DateTimeFormatter]))
+           [java.time.format DateTimeFormatter]
+           [java.util Base64]))
 
 (s/def ::key string?)
 
@@ -199,6 +200,67 @@
               "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
               model api-key)
          body (cond-> {:contents [{:parts [{:text prompt}]}]
+                       :generationConfig {:responseModalities ["TEXT" "IMAGE"]}}
+                system-instruction
+                (assoc :systemInstruction
+                       {:parts [{:text system-instruction}]}))
+         response (client/post url
+                               {:content-type :json
+                                :body (json/write-str body)
+                                :as :json
+                                :throw-exceptions false})
+         status (:status response)]
+     (when-not (<= 200 status 299)
+       (let [error-msg (extract-api-error (:body response))]
+         (error "gemini: API error" status "-" error-msg)
+         (throw (ex-info (str "Gemini API error: " error-msg)
+                         {:type :gemini-api-error
+                          :status status}))))
+     (if-let [image (extract-image (:body response))]
+       (do (record-image-generated!)
+           image)
+       (let [reason (extract-block-reason (:body response))]
+         (throw (ex-info (or reason
+                              "No image was generated. Try a different prompt.")
+                         {:type :no-image-generated
+                          :response-body (:body response)})))))))
+
+(defn- fetch-image-as-base64
+  "Fetch an image from a URL and return a map with :data (base64 string) and
+   :mime-type. Throws on failure."
+  [image-url]
+  (info "gemini: fetching image from" image-url)
+  (let [response (client/get image-url
+                             {:as :byte-array
+                              :throw-exceptions false
+                              :redirect-strategy :lax})
+        status (:status response)]
+    (when-not (<= 200 status 299)
+      (throw (ex-info (str "Failed to fetch image: HTTP " status)
+                      {:type :image-fetch-error :status status :url image-url})))
+    (let [content-type (get-in response [:headers "Content-Type"] "image/jpeg")
+          ;; Normalize content-type to just the mime portion
+          mime-type (first (string/split content-type #";"))
+          data (.encodeToString (Base64/getEncoder) ^bytes (:body response))]
+      {:data data :mime-type (string/trim mime-type)})))
+
+(defn generate-image-with-input
+  "Call the Gemini API to generate an image using both a text prompt and an
+   input image (specified by URL). The image is fetched, base64-encoded, and
+   sent as inlineData alongside the text prompt. Accepts an optional
+   system-instruction string."
+  ([prompt image-url] (generate-image-with-input prompt image-url nil))
+  ([prompt image-url system-instruction]
+   (check-budget!)
+   (let [{:keys [data mime-type]} (fetch-image-as-base64 image-url)
+         api-key (:key config)
+         model (gemini-model)
+         url (format
+              "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
+              model api-key)
+         body (cond-> {:contents [{:parts [{:text prompt}
+                                           {:inlineData {:mimeType mime-type
+                                                         :data data}}]}]
                        :generationConfig {:responseModalities ["TEXT" "IMAGE"]}}
                 system-instruction
                 (assoc :systemInstruction
